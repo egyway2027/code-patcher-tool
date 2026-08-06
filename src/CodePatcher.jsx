@@ -3,7 +3,8 @@
  * 📌 الملف: أداة التعديل الجراحي للأكواد (Code Patcher Tool)
  * 📁 المسار: src/components/tools/CodePatcher.jsx
  * 📝 الوظيفة: استبدال كتل الكود بدقة متناهية (SEARCH/REPLACE)
- *            دون تغيير أو المساس بباقي أسطر الملف.
+ *             دون تغيير أو المساس بباقي أسطر الملف مع معالجة مرنة
+ *             للمسافات والسطور الفارغة.
  * =========================================================
  */
 
@@ -17,14 +18,65 @@ export function CodePatcher({ themeStyles = {} }) {
   const [stats, setStats] = useState(null);
   const [copied, setCopied] = useState(false);
 
+  // 🧠 خوارزمية المطابقة المرنة للأسطر والمسافات لتجنب الفشل الناتج عن النسخ واللصق
+  const applyFuzzyReplace = (sourceText, searchStr, replaceStr) => {
+    // 1. المطابقة الحرفية المباشرة
+    if (sourceText.includes(searchStr)) {
+      return { success: true, text: sourceText.replace(searchStr, replaceStr) };
+    }
+
+    // 2. توحيد نهايات الأسطر (\r\n إلى \n)
+    const normSource = sourceText.replace(/\r\n/g, "\n");
+    const normSearch = searchStr.replace(/\r\n/g, "\n");
+    const normReplace = replaceStr.replace(/\r\n/g, "\n");
+
+    if (normSource.includes(normSearch)) {
+      return { success: true, text: normSource.replace(normSearch, normReplace) };
+    }
+
+    // 3. معالجة وتجاهل الأسطر الفارغة المزدوجة الناتجة عن شاشات الشات
+    const cleanSource = normSource.replace(/\n{3,}/g, "\n\n");
+    const cleanSearch = normSearch.replace(/\n{3,}/g, "\n\n");
+    if (cleanSource.includes(cleanSearch)) {
+      return { success: true, text: cleanSource.replace(cleanSearch, normReplace) };
+    }
+
+    // 4. مطابقة الأسطر سطرًا بسطر مع تجاهل المسافات البادئة واللاحقة (Trimmed Line Matching)
+    const sourceLines = normSource.split("\n");
+    const searchLines = normSearch
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l, i, arr) => !(l === "" && (i === 0 || i === arr.length - 1)));
+
+    if (searchLines.length === 0) return { success: false, text: sourceText };
+
+    for (let i = 0; i <= sourceLines.length - searchLines.length; i++) {
+      let isMatch = true;
+      for (let j = 0; j < searchLines.length; j++) {
+        if (sourceLines[i + j].trim() !== searchLines[j]) {
+          isMatch = false;
+          break;
+        }
+      }
+      if (isMatch) {
+        const newLines = [...sourceLines];
+        const replaceLines = normReplace.split("\n");
+        newLines.splice(i, searchLines.length, ...replaceLines);
+        return { success: true, text: newLines.join("\n") };
+      }
+    }
+
+    return { success: false, text: sourceText };
+  };
+
   const handleApplyPatch = () => {
     if (!originalCode.trim() || !patchBlocks.trim()) {
       alert("يرجى إدخال الكود الأصلي وكتل التعديل أولاً.");
       return;
     }
 
-    // Regex لمطابقة كتل البحث والاستبدال
-    const blockRegex = /<<<<<<< SEARCH\r?\n([\s\S]*?)\r?\n=======\r?\n([\s\S]*?)\r?\n>>>>>>> REPLACE/g;
+    // Regex مرن يتقبل كافة صيغ كتل البحث والاستبدال (SEARCH/REPLACE)
+    const blockRegex = /(?:<<<<<<< SEARCH|SEARCH >>>>>>>)[\r\n]+([\s\S]*?)[\r\n]+(?:=======|======)[\r\n]+([\s\S]*?)[\r\n]+(?:>>>>>>> REPLACE|REPLACE <<<<<<<)/g;
 
     let currentCode = originalCode;
     let appliedCount = 0;
@@ -32,19 +84,20 @@ export function CodePatcher({ themeStyles = {} }) {
     let match;
     let index = 0;
 
-    // استخراج وتطبيق الكتل واحدة تلو الأخرى
     while ((match = blockRegex.exec(patchBlocks)) !== null) {
       index++;
       const searchStr = match[1];
       const replaceStr = match[2];
 
-      if (currentCode.includes(searchStr)) {
-        currentCode = currentCode.replace(searchStr, replaceStr);
+      const res = applyFuzzyReplace(currentCode, searchStr, replaceStr);
+
+      if (res.success) {
+        currentCode = res.text;
         appliedCount++;
       } else {
         failedBlocks.push({
           blockNum: index,
-          snippet: searchStr.slice(0, 40) + "..."
+          snippet: searchStr.trim().slice(0, 40) + "..."
         });
       }
     }
