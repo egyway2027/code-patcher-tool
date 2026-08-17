@@ -18,46 +18,52 @@ export function CodePatcher({ themeStyles = {} }) {
   const [stats, setStats] = useState(null);
   const [copied, setCopied] = useState(false);
 
-  // 🧠 خوارزمية المطابقة المرنة للأسطر والمسافات لتجنب الفشل الناتج عن النسخ واللصق
+  // 🧹 إزالة وتوحيد المحارف غير المرئية والمسافات الصفرية والـ Non-breaking spaces
+  const cleanInvisibleChars = (str) => {
+    if (!str) return "";
+    return str
+      .replace(/\r\n/g, "\n")
+      .replace(/[\u00A0\u1680\u180E\u2000-\u200B\u202F\u205F\u3000\uFEFF]/g, " ")
+      .replace(/[\u200B-\u200D\u2060]/g, "");
+  };
+
+  // 🧠 خوارزمية الاستبدال الجراحي متعددة المستويات
   const applyFuzzyReplace = (sourceText, searchStr, replaceStr) => {
-    // 1. المطابقة الحرفية المباشرة
+    // 1. التطابق الحرفي المباشر
     if (sourceText.includes(searchStr)) {
       return { success: true, text: sourceText.replace(searchStr, replaceStr) };
     }
 
-    // 2. توحيد نهايات الأسطر (\r\n إلى \n)
-    const normSource = sourceText.replace(/\r\n/g, "\n");
-    const normSearch = searchStr.replace(/\r\n/g, "\n");
-    const normReplace = replaceStr.replace(/\r\n/g, "\n");
+    const normSource = cleanInvisibleChars(sourceText);
+    const normSearch = cleanInvisibleChars(searchStr);
+    const normReplace = cleanInvisibleChars(replaceStr);
 
+    // 2. التطابق بعد توحيد المسافات والمحارف الخفية
     if (normSource.includes(normSearch)) {
       return { success: true, text: normSource.replace(normSearch, normReplace) };
     }
 
-    // 3. معالجة وتجاهل الأسطر الفارغة المزدوجة الناتجة عن شاشات الشات
-    const cleanSource = normSource.replace(/\n{3,}/g, "\n\n");
-    const cleanSearch = normSearch.replace(/\n{3,}/g, "\n\n");
-    if (cleanSource.includes(cleanSearch)) {
-      return { success: true, text: cleanSource.replace(cleanSearch, normReplace) };
-    }
-
-    // 4. مطابقة الأسطر سطرًا بسطر مع تجاهل المسافات البادئة واللاحقة (Trimmed Line Matching)
+    // 3. مطابقة الأسطر مع تجاهل الفراغات البادئة والنهائية (Line-by-Line Trimmed Matching)
     const sourceLines = normSource.split("\n");
-    const searchLines = normSearch
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l, i, arr) => !(l === "" && (i === 0 || i === arr.length - 1)));
+    const rawSearchLines = normSearch.split("\n");
 
+    let startIdx = 0;
+    while (startIdx < rawSearchLines.length && rawSearchLines[startIdx].trim() === "") startIdx++;
+    let endIdx = rawSearchLines.length - 1;
+    while (endIdx >= startIdx && rawSearchLines[endIdx].trim() === "") endIdx--;
+
+    const searchLines = rawSearchLines.slice(startIdx, endIdx + 1);
     if (searchLines.length === 0) return { success: false, text: sourceText };
 
     for (let i = 0; i <= sourceLines.length - searchLines.length; i++) {
       let isMatch = true;
       for (let j = 0; j < searchLines.length; j++) {
-        if (sourceLines[i + j].trim() !== searchLines[j]) {
+        if (sourceLines[i + j].trim() !== searchLines[j].trim()) {
           isMatch = false;
           break;
         }
       }
+
       if (isMatch) {
         const newLines = [...sourceLines];
         const replaceLines = normReplace.split("\n");
@@ -75,8 +81,8 @@ export function CodePatcher({ themeStyles = {} }) {
       return;
     }
 
-    // Regex مرن يتقبل كافة صيغ كتل البحث والاستبدال (SEARCH/REPLACE)
-    const blockRegex = /(?:<<<<<<< SEARCH|SEARCH >>>>>>>)[\r\n]+([\s\S]*?)[\r\n]+(?:=======|======)[\r\n]+([\s\S]*?)[\r\n]+(?:>>>>>>> REPLACE|REPLACE <<<<<<<)/g;
+    // Regex مرن يتقبل مسافات الزوائد وصيغتي SEARCH / REPLACE
+    const blockRegex = /(?:<{7}\s*SEARCH|SEARCH\s*>{7})[^\n]*\n([\s\S]*?)\n(?:={7}|={6})[^\n]*\n([\s\S]*?)\n(?:>{7}\s*REPLACE|REPLACE\s*<{7})/g;
 
     let currentCode = originalCode;
     let appliedCount = 0;
@@ -84,7 +90,9 @@ export function CodePatcher({ themeStyles = {} }) {
     let match;
     let index = 0;
 
-    while ((match = blockRegex.exec(patchBlocks)) !== null) {
+    const normalizedPatches = cleanInvisibleChars(patchBlocks);
+
+    while ((match = blockRegex.exec(normalizedPatches)) !== null) {
       index++;
       const searchStr = match[1];
       const replaceStr = match[2];
@@ -97,7 +105,7 @@ export function CodePatcher({ themeStyles = {} }) {
       } else {
         failedBlocks.push({
           blockNum: index,
-          snippet: searchStr.trim().slice(0, 40) + "..."
+          snippet: searchStr.trim().split("\n")[0].slice(0, 45) + "..."
         });
       }
     }
@@ -180,7 +188,7 @@ export function CodePatcher({ themeStyles = {} }) {
           <textarea
             value={originalCode}
             onChange={(e) => setOriginalCode(e.target.value)}
-            placeholder="الصق كود الملف الأصلي هنا..."
+            placeholder="// الصق كود الملف الأصلي هنا..."
             rows={12}
             style={{
               width: "100%",
@@ -189,11 +197,15 @@ export function CodePatcher({ themeStyles = {} }) {
               borderRadius: 10,
               padding: 12,
               color: "#e0e0e0",
-              fontFamily: "monospace",
+              fontFamily: "'Fira Code', 'Courier New', monospace",
               fontSize: 12,
               resize: "vertical",
               boxSizing: "border-box",
-              outline: "none"
+              outline: "none",
+              direction: "ltr",
+              textAlign: "left",
+              unicodeBidi: "plaintext",
+              whiteSpace: "pre"
             }}
           />
         </div>
@@ -206,7 +218,7 @@ export function CodePatcher({ themeStyles = {} }) {
           <textarea
             value={patchBlocks}
             onChange={(e) => setPatchBlocks(e.target.value)}
-            placeholder={`<<<<<<< SEARCH\nالسطر المراد تغييره بالظبط\n=======\nالسطر الجديد البديل\n>>>>>>> REPLACE`}
+            placeholder={`<<<<<<< SEARCH\nالسطر المراد تغييره\n=======\nالسطر الجديد البديل\n>>>>>>> REPLACE`}
             rows={12}
             style={{
               width: "100%",
@@ -215,11 +227,15 @@ export function CodePatcher({ themeStyles = {} }) {
               borderRadius: 10,
               padding: 12,
               color: "#e0e0e0",
-              fontFamily: "monospace",
+              fontFamily: "'Fira Code', 'Courier New', monospace",
               fontSize: 12,
               resize: "vertical",
               boxSizing: "border-box",
-              outline: "none"
+              outline: "none",
+              direction: "ltr",
+              textAlign: "left",
+              unicodeBidi: "plaintext",
+              whiteSpace: "pre"
             }}
           />
         </div>
@@ -301,11 +317,15 @@ export function CodePatcher({ themeStyles = {} }) {
               borderRadius: 10,
               padding: 12,
               color: "#22c55e",
-              fontFamily: "monospace",
+              fontFamily: "'Fira Code', 'Courier New', monospace",
               fontSize: 12,
               resize: "vertical",
               boxSizing: "border-box",
-              outline: "none"
+              outline: "none",
+              direction: "ltr",
+              textAlign: "left",
+              unicodeBidi: "plaintext",
+              whiteSpace: "pre"
             }}
           />
         </div>
