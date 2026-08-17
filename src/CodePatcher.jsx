@@ -27,11 +27,43 @@ export function CodePatcher({ themeStyles = {} }) {
       .replace(/[\u200B-\u200D\u2060]/g, "");
   };
 
+  // 🧹 توحيد المسافات الداخلية المتكررة (مسافات/تابات متعددة) إلى مسافة واحدة + إزالة البادئة/النهاية
+  const collapseWhitespace = (str) => (str || "").trim().replace(/[ \t]+/g, " ");
+
+  // 🧠 حساب نسبة التشابه بين سطرين/كتلتين (Levenshtein Distance Ratio)
+  const similarityRatio = (a, b) => {
+    const la = a.length, lb = b.length;
+    if (la === 0 && lb === 0) return 1;
+    if (la === 0 || lb === 0) return 0;
+    // حماية بسيطة من البطء الشديد على النصوص الطويلة جدًا
+    if (la > 4000 || lb > 4000) return a === b ? 1 : 0;
+
+    let prevRow = new Array(lb + 1);
+    let currRow = new Array(lb + 1);
+    for (let j = 0; j <= lb; j++) prevRow[j] = j;
+
+    for (let i = 1; i <= la; i++) {
+      currRow[0] = i;
+      for (let j = 1; j <= lb; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        currRow[j] = Math.min(
+          prevRow[j] + 1,        // حذف
+          currRow[j - 1] + 1,    // إضافة
+          prevRow[j - 1] + cost  // استبدال
+        );
+      }
+      [prevRow, currRow] = [currRow, prevRow];
+    }
+
+    const dist = prevRow[lb];
+    return 1 - dist / Math.max(la, lb);
+  };
+
   // 🧠 خوارزمية الاستبدال الجراحي متعددة المستويات
   const applyFuzzyReplace = (sourceText, searchStr, replaceStr) => {
     // 1. التطابق الحرفي المباشر
     if (sourceText.includes(searchStr)) {
-      return { success: true, text: sourceText.replace(searchStr, replaceStr) };
+      return { success: true, text: sourceText.replace(searchStr, replaceStr), level: "exact" };
     }
 
     const normSource = cleanInvisibleChars(sourceText);
@@ -40,7 +72,7 @@ export function CodePatcher({ themeStyles = {} }) {
 
     // 2. التطابق بعد توحيد المسافات والمحارف الخفية
     if (normSource.includes(normSearch)) {
-      return { success: true, text: normSource.replace(normSearch, normReplace) };
+      return { success: true, text: normSource.replace(normSearch, normReplace), level: "cleaned" };
     }
 
     // 3. مطابقة الأسطر مع تجاهل الفراغات البادئة والنهائية (Line-by-Line Trimmed Matching)
@@ -55,6 +87,8 @@ export function CodePatcher({ themeStyles = {} }) {
     const searchLines = rawSearchLines.slice(startIdx, endIdx + 1);
     if (searchLines.length === 0) return { success: false, text: sourceText };
 
+    const replaceLines = normReplace.split("\n");
+
     for (let i = 0; i <= sourceLines.length - searchLines.length; i++) {
       let isMatch = true;
       for (let j = 0; j < searchLines.length; j++) {
@@ -66,9 +100,63 @@ export function CodePatcher({ themeStyles = {} }) {
 
       if (isMatch) {
         const newLines = [...sourceLines];
-        const replaceLines = normReplace.split("\n");
         newLines.splice(i, searchLines.length, ...replaceLines);
-        return { success: true, text: newLines.join("\n") };
+        return { success: true, text: newLines.join("\n"), level: "trimmed" };
+      }
+    }
+
+    // 4. مطابقة الأسطر مع تجاهل حالة الأحرف (Capital/Small) + توحيد المسافات الداخلية المتكررة
+    for (let i = 0; i <= sourceLines.length - searchLines.length; i++) {
+      let isMatch = true;
+      for (let j = 0; j < searchLines.length; j++) {
+        if (
+          collapseWhitespace(sourceLines[i + j]).toLowerCase() !==
+          collapseWhitespace(searchLines[j]).toLowerCase()
+        ) {
+          isMatch = false;
+          break;
+        }
+      }
+
+      if (isMatch) {
+        const newLines = [...sourceLines];
+        newLines.splice(i, searchLines.length, ...replaceLines);
+        return { success: true, text: newLines.join("\n"), level: "case-insensitive" };
+      }
+    }
+
+    // 5. مطابقة تقريبية (Fuzzy) كملاذ أخير — بنسبة تشابه ≥ 88%
+    //    (تُستخدم فقط عند وجود اختلافات طفيفة كحروف زائدة/ناقصة أو رموز بسيطة)
+    if (searchLines.length <= 60) {
+      const searchJoined = searchLines
+        .map((l) => collapseWhitespace(l).toLowerCase())
+        .join("\n");
+
+      let bestIdx = -1;
+      let bestScore = 0;
+
+      for (let i = 0; i <= sourceLines.length - searchLines.length; i++) {
+        const chunkJoined = sourceLines
+          .slice(i, i + searchLines.length)
+          .map((l) => collapseWhitespace(l).toLowerCase())
+          .join("\n");
+
+        const score = similarityRatio(chunkJoined, searchJoined);
+        if (score > bestScore) {
+          bestScore = score;
+          bestIdx = i;
+        }
+      }
+
+      if (bestIdx !== -1 && bestScore >= 0.88) {
+        const newLines = [...sourceLines];
+        newLines.splice(bestIdx, searchLines.length, ...replaceLines);
+        return {
+          success: true,
+          text: newLines.join("\n"),
+          level: "fuzzy",
+          score: bestScore
+        };
       }
     }
 
@@ -87,10 +175,16 @@ export function CodePatcher({ themeStyles = {} }) {
     let currentCode = originalCode;
     let appliedCount = 0;
     let failedBlocks = [];
+    let warningBlocks = [];
     let match;
     let index = 0;
 
     const normalizedPatches = cleanInvisibleChars(patchBlocks);
+
+    const levelLabels = {
+      "case-insensitive": "تجاهل حالة الأحرف (Capital/Small) + توحيد المسافات",
+      fuzzy: "مطابقة تقريبية (Fuzzy)"
+    };
 
     while ((match = blockRegex.exec(normalizedPatches)) !== null) {
       index++;
@@ -102,6 +196,15 @@ export function CodePatcher({ themeStyles = {} }) {
       if (res.success) {
         currentCode = res.text;
         appliedCount++;
+
+        if (res.level === "case-insensitive" || res.level === "fuzzy") {
+          warningBlocks.push({
+            blockNum: index,
+            reason: levelLabels[res.level],
+            score: res.score,
+            snippet: searchStr.trim().split("\n")[0].slice(0, 45) + "..."
+          });
+        }
       } else {
         failedBlocks.push({
           blockNum: index,
@@ -114,7 +217,8 @@ export function CodePatcher({ themeStyles = {} }) {
     setStats({
       total: index,
       applied: appliedCount,
-      failed: failedBlocks
+      failed: failedBlocks,
+      warnings: warningBlocks
     });
     setCopied(false);
   };
@@ -294,6 +398,20 @@ export function CodePatcher({ themeStyles = {} }) {
               {copied ? "تم النسخ!" : "نسخ الكود النهائي"}
             </button>
           </div>
+
+          {stats.warnings && stats.warnings.length > 0 && (
+            <div style={{ background: "rgba(234, 179, 8, 0.1)", border: "1px solid #eab308", borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 12, color: "#facc15" }}>
+              <strong>⚠️ تنبيه: الكتل التالية تم تطبيقها بمطابقة مرنة وليست حرفية 100% — يُفضّل مراجعتها في الناتج:</strong>
+              <ul style={{ margin: "6px 0 0 0", paddingRight: 20 }}>
+                {stats.warnings.map((w, i) => (
+                  <li key={i}>
+                    كتلة رقم {w.blockNum}: "{w.snippet}" — السبب: {w.reason}
+                    {typeof w.score === "number" ? ` (تشابه ${Math.round(w.score * 100)}%)` : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {stats.failed.length > 0 && (
             <div style={{ background: "rgba(239, 68, 68, 0.1)", border: "1px solid #ef4444", borderRadius: 10, padding: 12, marginBottom: 16, fontSize: 12, color: "#f87171" }}>
